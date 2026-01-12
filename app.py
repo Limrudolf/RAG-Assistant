@@ -1,9 +1,12 @@
 import streamlit as st
 import os
+import datetime
 from operator import itemgetter
 from pydantic import BaseModel, Field
 from typing import Literal, List
 import pickle
+from google.cloud import bigquery
+from google.oauth2 import service_account
 
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables import RunnablePassthrough, RunnableParallel, RunnableLambda
@@ -20,6 +23,57 @@ MY_API_KEY = st.secrets["GOOGLE_API_KEY"]
 
 st.set_page_config(page_title="Competitive Programming Handbook", layout="wide")
 st.title("Competitive Programming Handbook")
+
+def save_feedback(index):
+    """Triggered when a user clicks thumbs up/down"""
+    # Get the message and the new feedback value
+    msg = st.session_state.messages[index]
+    feedback_score = st.session_state[f"feedback_{index}"]
+    
+    if feedback_score:
+        # Map score to string if needed, or just log the raw dictionary/score
+        sentiment_map = {1 : "Positive", 0: "Negative"}
+        sentiment = sentiment_map.get(feedback_score, "Unknown")
+        
+        # Log to BigQuery (Updating the row with feedback)
+        # We re-log the entry but this time WITH feedback
+        log_to_bigquery(
+            question=msg["question"], 
+            answer=msg["content"], 
+            sources=msg["sources"], 
+            feedback=sentiment
+        )
+        st.toast(f"Feedback {sentiment} recorded!", icon="📝")
+
+def log_to_bigquery(question, answer, sources, feedback=None):
+    """Logs the interaction to BigQuery."""
+    try:
+        if "gcp_service_account" not in st.secrets:
+            return
+
+        credentials = service_account.Credentials.from_service_account_info(
+            st.secrets["gcp_service_account"]
+        )
+        client = bigquery.Client(credentials=credentials, project=credentials.project_id)
+
+        source_str = "; ".join([f"Page {d.metadata.get('page', '?')}" for d in sources]) if sources else "None"
+        
+        rows_to_insert = [{
+            "timestamp": datetime.datetime.now().isoformat(),
+            "question": question,
+            "answer": answer,
+            "feedback": feedback,
+            "sources": source_str
+        }]
+
+        table_id = f"{credentials.project_id}.rag_logs.Interactions"
+        errors = client.insert_rows_json(table_id, rows_to_insert)
+        
+        if errors:
+            st.error(f"BigQuery Error: {errors}")
+            
+    except Exception as e:
+        st.error(f"Logging Failed: {e}")
 
 #Structured Output Schema (Modern Pydantic v2)
 class GradeDocuments(BaseModel):
@@ -133,23 +187,47 @@ chain = load_chain()
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
-for message in st.session_state.messages:
+# 1. Display Chat History (Now with Feedback Buttons!)
+for i, message in enumerate(st.session_state.messages):
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
+        
+        # Only show extra controls for the Assistant
+        if message["role"] == "assistant":
+            # A. Show Sources (Persisted)
+            if message.get("sources"):
+                with st.expander(f"View {len(message['sources'])} Verified Sources"):
+                    for idx, doc in enumerate(message["sources"]):
+                        st.info(f"**Source {idx+1} (Page {doc.metadata.get('page')}):**\n\n{doc.page_content}")
+            
+            # B. Show Feedback Button
+            # We use 'key' to bind this specific button to this specific message index
+            st.feedback(
+                "thumbs", 
+                key=f"feedback_{i}", 
+                on_change=save_feedback,
+                args=[i]  # Pass the index to the function
+            )
 
+# 2. Handle New Input
 if user_input := st.chat_input("Ask about Competitive Programming"):
+    # A. Display User Message
     st.session_state.messages.append({"role": "user", "content": user_input})
     with st.chat_message("user"):
         st.markdown(user_input)
 
+    # B. Generate Assistant Response
     with st.chat_message("assistant"):
         with st.spinner("Retrieving and Grading Evidence..."):
+            # Prepare context for the chain
             chat_history = []
-            for msg in st.session_state.messages[:-1]: # Skip the latest msg
+            for msg in st.session_state.messages[:-1]: 
                 if msg["role"] == "user":
                     chat_history.append(HumanMessage(content=msg["content"]))
                 else:
                     chat_history.append(AIMessage(content=msg["content"]))
+            
+            # Run Chain
             response = chain.invoke({
                 "question": user_input,
                 "chat_history": chat_history
@@ -158,13 +236,25 @@ if user_input := st.chat_input("Ask about Competitive Programming"):
             answer_text = response["answer"]
             filtered_docs = response["sources"]
 
+            # Display Answer immediately
             st.markdown(answer_text)
             
+            # Display Sources immediately
             if filtered_docs:
                 with st.expander(f"View {len(filtered_docs)} Verified Sources"):
                     for i, doc in enumerate(filtered_docs):
                         st.info(f"**Source {i+1} (Page {doc.metadata.get('page')}):**\n\n{doc.page_content}")
-            else:
-                st.warning("No relevant sources found.")
 
-    st.session_state.messages.append({"role": "assistant", "content": answer_text})
+            # C. Log the "Base" Interaction (Feedback is None for now)
+            log_to_bigquery(user_input, answer_text, filtered_docs, feedback=None)
+
+    # D. Save to History (With extra metadata for the UI loop)
+    st.session_state.messages.append({
+        "role": "assistant", 
+        "content": answer_text,
+        "sources": filtered_docs, # Save sources so they persist!
+        "question": user_input    # Save question so we can log it with feedback later
+    })
+    
+    # Rerun to show the feedback button immediately
+    st.rerun()
