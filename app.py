@@ -187,14 +187,12 @@ chain = load_chain()
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
-# 1. Display Chat History (Now with Feedback Buttons!)
+# 1. Display Chat History
 for i, message in enumerate(st.session_state.messages):
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
         
-        # Only show extra controls for the Assistant
         if message["role"] == "assistant":
-            # A. Show Sources (Persisted)
             if message.get("sources"):
                 with st.expander(f"View {len(message['sources'])} Verified Sources"):
                     for idx, doc in enumerate(message["sources"]):
@@ -248,13 +246,11 @@ if user_input := st.chat_input("Ask about Competitive Programming"):
             # C. Log the "Base" Interaction (Feedback is None for now)
             log_to_bigquery(user_input, answer_text, filtered_docs, feedback=None)
 
-    # D. Save to History (With extra metadata for the UI loop)
     st.session_state.messages.append({
         "role": "assistant", 
         "content": answer_text,
-        "sources": filtered_docs, # Save sources so they persist!
-        "question": user_input    # Save question so we can log it with feedback later
+        "sources": filtered_docs,
+        "question": user_input
     })
     
-    # Rerun to show the feedback button immediately
     st.rerun()
