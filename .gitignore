@@ -4,6 +4,7 @@ __pycache__/
 venv/
 .env
 .streamlit/secrets.toml
+rag-agent-483703-3d5f68791db1.json
 
 !faiss_index/
 !docstore.pkl
