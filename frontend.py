@@ -2,7 +2,11 @@ import streamlit as st
 import requests
 
 # Configuration
-API_URL = "http://localhost:8000"
+if "API_URL" in st.secrets:
+    API_URL = st.secrets["API_URL"]
+else:
+    # Fallback to local if no secrets found
+    API_URL = "http://localhost:8000"
 
 st.set_page_config(page_title="CP Handbook (FastAPI)", layout="wide")
 st.title("Competitive Programming Handbook")
